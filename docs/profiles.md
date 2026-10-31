@@ -188,9 +188,57 @@ Pi owns the actual model support matrix. In the installed Pi documentation, see 
 | `access.pathScope` | object | omitted | Default path scope for this role. The orchestrator can also pass `pathScopeRoots` at delegate time. |
 | `access.extensionMode` | string | `"worker-minimal"` | `"worker-minimal"` or `"disable"`. `"inherit"` is rejected to prevent recursive orchestrators. |
 | `access.extensions` | string[] | omitted | Explicit Pi extension sources for this role's workers. Use this for provider/model extensions that must be loaded before the worker model is selected. |
-| `access.canSpawnWorkers` | boolean | `false` | Reserved for role metadata. Workers still run as background RPC peers, not nested user-facing agents. |
+| `access.canSpawnWorkers` | boolean | `false` | `true` lets this role delegate to its own workers (nested delegation). The launch policy — not the role file — injects the team extension and the collaboration tools, and rejects the role when the depth budget is exhausted. See [Nested delegation](#nested-delegation). |
 
 Pi 1.1.0 supports tool patterns and additive selectors on its CLI, but worker roles require exact names so a tool override can only narrow the declared set. For example, use `["read", "mcp__docs__search"]`, not `["+read", "mcp__docs__*"]`. Unlisted MCP tools are excluded even though Pi normally keeps them with `--tools`.
+
+### Nested delegation
+
+A worker is normally a leaf: it runs its role prompt and returns one final answer
+to the orchestrator. Setting `access.canSpawnWorkers: true` turns that worker
+into a sub-orchestrator that can call `delegate_task` itself, so a task can be
+split twice:
+
+```text
+orchestrator  ->  coordinator (depth 1)  ->  leaf (depth 2)
+```
+
+```json
+{
+  "workerAccess": { "maxWorkerDepth": 2 },
+  "roles": {
+    "coordinator": {
+      "whenToUse": "Use when a task should be split across helper agents.",
+      "access": {
+        "tools": ["read", "grep", "find", "ls", "bash"],
+        "extensionMode": "worker-minimal",
+        "canSpawnWorkers": true
+      }
+    }
+  }
+}
+```
+
+How it works and what bounds it:
+
+- `workerAccess.maxWorkerDepth` (0-8, default `1`) is the number of levels
+  below the orchestrator that may delegate. `0` disables nesting entirely.
+  An out-of-range value invalidates the file rather than silently clamping.
+- The budget is inherited, not re-read: the orchestrator passes
+  `PI_AGENT_TEAM_DEPTH` and `PI_AGENT_TEAM_MAX_DEPTH` to the worker, and a
+  worker's own `agents-team.json` can only lower it.
+- `canSpawnWorkers` adds `delegate_task`, `agent_status`, `agent_result`,
+  `agent_message`, `wait_for_agents`, `agent_cancel`, and `ping_agents`
+  to the worker's tools, and loads the team extension in that worker. Roles
+  without the flag keep rejecting the team extension as a recursive
+  orchestrator source.
+- Each level picks its own model: a nested worker inherits its spawner's model
+  unless the role sets `model` or the caller passes `delegate_task.model`.
+- A nested worker gets no operator console: `/team-*` commands are not
+  registered, and the orchestrator system prompt is not injected. It keeps its
+  role prompt and reports one final answer upward.
+- Nested workers are invisible to the root dashboard; the root sees only its
+  own direct reports. Their state lives in the nested worker's own session.
 
 Project Trust is not a role field. Worker launches inside the active project root get `--approve` or `--no-approve` from the orchestrator's current session trust. Launches outside that root, or host contexts that unexpectedly provide no trust decision, get no trust override.
 

@@ -206,6 +206,8 @@ export type PartialRawProjectRoleConfigMap = Record<string, RawProjectRoleConfig
 
 export interface TeamProjectWorkerAccessConfig {
 	allowPathsOutsideProject?: boolean;
+	/** Levels below the orchestrator that may themselves delegate (0 disables nesting). */
+	maxWorkerDepth?: number;
 }
 
 export interface TeamProjectDisplayConfig {
@@ -419,6 +421,8 @@ export interface TeamConfig {
 	};
 	safety: {
 		preventRecursiveOrchestrator: boolean;
+		/** How many levels below the orchestrator may themselves delegate. 0 disables nesting. */
+		maxWorkerDepth: number;
 		defaultWorkerExtensionMode: WorkerExtensionMode;
 		requirePathScopeForWrites: boolean;
 		allowWorkerPathsOutsideProject: boolean;

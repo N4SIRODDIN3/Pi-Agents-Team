@@ -149,6 +149,10 @@ export class TeamManager {
 	private taskCounter = 0;
 	private _routingMode: RoutingMode;
 	private readonly activePingTimeoutMs: number;
+	/** Depth of this session: 0 = orchestrator, 1+ = nested worker. */
+	readonly workerDepth: number;
+	/** Extension entry used to wire nested workers; undefined at the orchestrator. */
+	readonly selfEntryPath?: string;
 	private readonly activeRefreshes = new Map<string, Promise<ActiveRefreshOutcome>>();
 	readonly displayCost: boolean;
 
@@ -159,12 +163,18 @@ export class TeamManager {
 		routingMode?: RoutingMode;
 		displayCost?: boolean;
 		activePingTimeoutMs?: number;
+		/** Depth of this manager's session: 0 is the orchestrator, 1+ is a nested worker. */
+		workerDepth?: number;
+		/** Absolute path of this package's extension entry, used to wire nested workers. */
+		selfEntryPath?: string;
 	}) {
 		this.config = options?.config ?? DEFAULT_TEAM_CONFIG;
 		this.registry = options?.registry ?? new TaskRegistry();
 		this.workerManager = options?.workerManager ?? new WorkerManager();
 		this._routingMode = options?.routingMode ?? "team";
 		this.activePingTimeoutMs = options?.activePingTimeoutMs ?? ACTIVE_PING_REFRESH_TIMEOUT_MS;
+		this.workerDepth = options?.workerDepth ?? 0;
+		this.selfEntryPath = options?.selfEntryPath;
 		this.displayCost = options?.displayCost !== false;
 		this.workerManager.onEvent((worker) => {
 			this.registry.upsertWorker(worker.state);
@@ -267,6 +277,8 @@ export class TeamManager {
 				tools: request.tools,
 				extensionMode: request.extensionMode,
 				systemPromptPath: request.systemPromptPath,
+				workerDepth: this.workerDepth + 1,
+				selfEntryPath: this.selfEntryPath,
 			},
 			this.config,
 		);
@@ -313,6 +325,15 @@ export class TeamManager {
 				// the task prompt's requested-skill instructions are impossible to
 				// satisfy.
 				allowSkills: task.skills !== undefined && task.skills.length > 0,
+				// A nested worker must know its own depth and the inherited budget so
+				// its children can be gated without trusting local config.
+				env: launchPlan.nestedDelegation
+					? {
+						...process.env,
+						PI_AGENT_TEAM_DEPTH: String(launchPlan.workerDepth),
+						PI_AGENT_TEAM_MAX_DEPTH: String(launchPlan.maxWorkerDepth),
+					}
+					: undefined,
 				signal,
 			});
 		} catch (error) {
@@ -598,6 +619,8 @@ export class TeamManager {
 				tools: request.tools,
 				extensionMode: request.extensionMode,
 				systemPromptPath: request.systemPromptPath,
+				workerDepth: this.workerDepth + 1,
+				selfEntryPath: this.selfEntryPath,
 			},
 			this.config,
 		);

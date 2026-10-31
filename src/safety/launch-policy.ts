@@ -25,6 +25,10 @@ export interface LaunchPolicyRequest {
 	tools?: string[];
 	extensionMode?: WorkerExtensionMode;
 	systemPromptPath?: string;
+	/** Depth of the worker being launched: 1 is a direct child of the orchestrator. */
+	workerDepth?: number;
+	/** Absolute path of this package's own extension entry, required to nest. */
+	selfEntryPath?: string;
 }
 
 export interface LaunchPolicyResult {
@@ -37,6 +41,10 @@ export interface LaunchPolicyResult {
 	workerExtensions?: string[];
 	extensionMode: WorkerExtensionMode;
 	systemPromptPath: string;
+	/** True when this worker may delegate to its own workers. */
+	nestedDelegation: boolean;
+	workerDepth: number;
+	maxWorkerDepth: number;
 }
 
 function extensionModeRank(mode: WorkerExtensionMode): number {
@@ -71,6 +79,21 @@ function isExtensionModeNarrowerOrEqual(candidate: WorkerExtensionMode, baseline
  * "bash as escape hatch" for the full rationale.
  */
 const WRITE_CAPABLE_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);
+
+/**
+ * Tools a nested worker needs to run its own team. They are injected from the
+ * launch policy, never from user-authored role config, so a role cannot widen
+ * its collaboration surface beyond what canSpawnWorkers grants.
+ */
+export const NESTED_DELEGATION_TOOLS = [
+	"delegate_task",
+	"agent_status",
+	"agent_result",
+	"agent_message",
+	"wait_for_agents",
+	"agent_cancel",
+	"ping_agents",
+] as const;
 
 function rejectRecursiveOrchestratorExtensions(sources: readonly string[] | undefined, baseDir: string): void {
 	const blockedSource = sources?.find((source) => isRecursiveOrchestratorExtensionSource(source, baseDir));
@@ -175,15 +198,52 @@ export function applyLaunchPolicy(
 
 	const pathScope = resolvePathScope(request, config, tools);
 
+	// Nested delegation: a role opts in with `canSpawnWorkers: true`. The launch
+	// policy — never the role config — decides what that grants, so a role cannot
+	// hand itself the orchestrator extension or its collaboration tools.
+	const workerDepth = request.workerDepth ?? 1;
+	const maxWorkerDepth = config.safety.maxWorkerDepth;
+	const nestedDelegation = request.profile.canSpawnWorkers === true;
+	const resolvedTools = [...tools];
+	const resolvedExtensions = request.profile.extensions ? [...request.profile.extensions] : [];
+	if (nestedDelegation) {
+		if (workerDepth > maxWorkerDepth) {
+			throw new Error(
+				`Nested delegation depth ${workerDepth} exceeds the configured limit ${maxWorkerDepth}. Raise workerAccess.maxWorkerDepth in agents-team.json (0-8) to allow deeper nesting.`,
+			);
+		}
+		if (extensionMode === "disable") {
+			throw new Error(
+				`Role "${request.profile.name}" sets canSpawnWorkers but extensionMode is disable, so the collaboration tools could never load. Use worker-minimal.`,
+			);
+		}
+		if (!request.selfEntryPath) {
+			throw new Error(
+				`Role "${request.profile.name}" sets canSpawnWorkers but no extension entry path was provided; nested delegation cannot be wired.`,
+			);
+		}
+		// Deeper levels may exist, so every nested worker carries the tools too.
+		for (const tool of NESTED_DELEGATION_TOOLS) {
+			if (!resolvedTools.includes(tool)) resolvedTools.push(tool);
+		}
+		const selfEntry = request.selfEntryPath;
+		if (!resolvedExtensions.some((source) => resolve(request.cwd, source) === resolve(selfEntry))) {
+			resolvedExtensions.unshift(selfEntry);
+		}
+	}
+
 	return {
 		cwd: resolve(request.cwd),
 		profile: request.profile,
 		pathScope,
 		model: request.model ?? request.profile.model ?? request.orchestratorModel,
 		thinkingLevel: request.thinkingLevel ?? request.profile.thinkingLevel ?? request.orchestratorThinkingLevel ?? "medium",
-		tools,
-		workerExtensions: request.profile.extensions ? [...request.profile.extensions] : undefined,
+		tools: resolvedTools,
+		workerExtensions: resolvedExtensions.length > 0 ? resolvedExtensions : undefined,
 		extensionMode,
 		systemPromptPath: resolveSystemPromptPath(request, config),
+		nestedDelegation,
+		workerDepth,
+		maxWorkerDepth,
 	};
 }

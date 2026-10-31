@@ -1,4 +1,5 @@
 import { closeSync, existsSync, fstatSync, openSync, readSync, statSync, truncateSync, unlinkSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { CURRENT_SCAFFOLD_VERSION, DEFAULT_TEAM_CONFIG, createDefaultTeamState } from "../../src/config.js";
@@ -503,12 +504,48 @@ export const _testing = {
 	thinkingLevelWarningToastKey,
 };
 
+/**
+ * Nested workers (spawned by a worker that opted into canSpawnWorkers) run the
+ * same extension, but they must not behave like an orchestrator: no commands, no
+ * dashboard, no orchestrator system prompt. The launch policy injects these two
+ * variables; the depth budget is clamped to whatever the root approved so a
+ * worker's own agents-team.json cannot widen it.
+ */
+function readWorkerDepthEnvironment(): { workerDepth: number; maxWorkerDepth?: number } {
+	const parse = (name: string): number | undefined => {
+		const raw = process.env[name];
+		if (raw === undefined || raw === "") return undefined;
+		const value = Number(raw);
+		return Number.isInteger(value) && value >= 0 ? value : undefined;
+	};
+	return {
+		workerDepth: parse("PI_AGENT_TEAM_DEPTH") ?? 0,
+		maxWorkerDepth: parse("PI_AGENT_TEAM_MAX_DEPTH"),
+	};
+}
+
 export default function (pi: ExtensionAPI): void {
+	const { workerDepth, maxWorkerDepth: inheritedMaxWorkerDepth } = readWorkerDepthEnvironment();
+	const nestedWorker = workerDepth > 0;
+	const selfEntryPath = fileURLToPath(import.meta.url);
 	let activeProjectConfig = loadActiveTeamConfig({
 		cwd: process.cwd(),
 		baseConfig: DEFAULT_TEAM_CONFIG,
 		projectConfigTrusted: false,
 	});
+
+	if (nestedWorker && inheritedMaxWorkerDepth !== undefined) {
+		activeProjectConfig = {
+			...activeProjectConfig,
+			config: {
+				...activeProjectConfig.config,
+				safety: {
+					...activeProjectConfig.config.safety,
+					maxWorkerDepth: Math.min(activeProjectConfig.config.safety.maxWorkerDepth, inheritedMaxWorkerDepth),
+				},
+			},
+		};
+	}
 
 	// Mutate the profileName description to surface the current role list right
 	// in the tool schema. Pi's ToolDefinition.parameters is frozen at
@@ -528,6 +565,8 @@ export default function (pi: ExtensionAPI): void {
 		config: activeProjectConfig.config,
 		routingMode: deriveInitialRoutingMode(activeProjectConfig),
 		displayCost: activeProjectConfig.displayCost,
+		workerDepth,
+		selfEntryPath,
 	});
 	let teamState = createDefaultTeamState(activeProjectConfig.config);
 	let activeContext: ExtensionContext | undefined;
@@ -999,7 +1038,7 @@ export default function (pi: ExtensionAPI): void {
 	async function replaceTeamManager(config: TeamConfig): Promise<void> {
 		detachTeamManagerListener();
 		await teamManager.dispose();
-		teamManager = new TeamManager({ config, routingMode: deriveInitialRoutingMode(activeProjectConfig), displayCost: activeProjectConfig.displayCost });
+		teamManager = new TeamManager({ config, routingMode: deriveInitialRoutingMode(activeProjectConfig), displayCost: activeProjectConfig.displayCost, workerDepth, selfEntryPath });
 		attachTeamManagerListener(teamManager);
 		teamState = createDefaultTeamState(config);
 		renderUi(activeContext, teamState, spinnerFrame, config, isTeamActive(activeProjectConfig), teamManager.routingMode, activeProjectConfig.displayCost);
@@ -1013,18 +1052,22 @@ export default function (pi: ExtensionAPI): void {
 		},
 		emitText: (ctx: ExtensionContext, text: string) => emitCommandOutput(pi, ctx, text, activeProjectConfig.config),
 	};
-	registerTeamCommand(pi, commandDependencies);
-	registerCopyCommand(pi, commandDependencies);
-	registerTeamInitCommand(pi, { emitText: commandDependencies.emitText });
-	registerTeamEnableCommand(pi, {
-		getTeamManager: () => teamManager,
-		getProjectConfig: () => activeProjectConfig,
-		emitText: commandDependencies.emitText,
-		ensureNotReloading,
-	});
-	registerTeamResultCommand(pi, commandDependencies);
-	registerTeamSteerCommand(pi, commandDependencies);
-	registerTeamStopCommand(pi, commandDependencies);
+	// A nested worker gets tools, not an operator console: registering the
+	// /team-* commands there would let it rewrite config that governs its parent.
+	if (!nestedWorker) {
+		registerTeamCommand(pi, commandDependencies);
+		registerCopyCommand(pi, commandDependencies);
+		registerTeamInitCommand(pi, { emitText: commandDependencies.emitText });
+		registerTeamEnableCommand(pi, {
+			getTeamManager: () => teamManager,
+			getProjectConfig: () => activeProjectConfig,
+			emitText: commandDependencies.emitText,
+			ensureNotReloading,
+		});
+		registerTeamResultCommand(pi, commandDependencies);
+		registerTeamSteerCommand(pi, commandDependencies);
+		registerTeamStopCommand(pi, commandDependencies);
+	}
 
 	function ensureNotReloading(): void {
 		if (reloading) {
@@ -1399,6 +1442,12 @@ export default function (pi: ExtensionAPI): void {
 		orchestratorWorking = true;
 		teamState = teamManager.snapshot();
 		renderUi(ctx, teamState, spinnerFrame, activeProjectConfig.config, isTeamActive(activeProjectConfig), teamManager.routingMode, activeProjectConfig.displayCost);
+		if (nestedWorker) {
+			// A nested worker already runs the role prompt its parent gave it. Injecting
+			// the orchestrator contract here would tell it to lead a team instead of
+			// doing the delegated work, and would leak the parent's tree vocabulary.
+			return { systemPrompt: event.systemPrompt };
+		}
 		if (!activeProjectConfig.enabled) {
 			return { systemPrompt: event.systemPrompt };
 		}

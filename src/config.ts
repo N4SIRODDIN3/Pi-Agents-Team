@@ -72,6 +72,8 @@ export const ProjectRoleAccessSchema = Type.Object({
 
 export const TeamProjectWorkerAccessSchema = Type.Object({
 	allowPathsOutsideProject: Type.Optional(Type.Boolean()),
+	/** Levels below the orchestrator that may themselves delegate (0 disables nesting). */
+	maxWorkerDepth: Type.Optional(Type.Integer({ minimum: 0, maximum: 8 })),
 }, { additionalProperties: false });
 
 export const TeamProjectDisplaySchema = Type.Object({
@@ -252,6 +254,7 @@ export const TeamConfigSchema = Type.Object({
 	}),
 	safety: Type.Object({
 		preventRecursiveOrchestrator: Type.Boolean({ default: true }),
+		maxWorkerDepth: Type.Integer({ minimum: 0, maximum: 8, default: 1 }),
 		defaultWorkerExtensionMode: enumSchema(WORKER_EXTENSION_MODES),
 		requirePathScopeForWrites: Type.Boolean({ default: true }),
 		allowWorkerPathsOutsideProject: Type.Boolean({ default: true }),
@@ -317,6 +320,7 @@ export const DEFAULT_TEAM_CONFIG: TeamConfig = {
 	},
 	safety: {
 		preventRecursiveOrchestrator: true,
+		maxWorkerDepth: 1,
 		defaultWorkerExtensionMode: "worker-minimal",
 		requirePathScopeForWrites: true,
 		allowWorkerPathsOutsideProject: true,

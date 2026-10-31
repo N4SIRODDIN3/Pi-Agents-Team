@@ -1010,6 +1010,11 @@ export function loadActiveTeamConfig(options: LoadActiveTeamConfigOptions = { cw
 
 	const projectRoot = projectPath ? computeLayerRoot("project", projectPath) : options.cwd;
 	const allowWorkerPathsOutsideProject = winningLayer.parsed.workerAccess?.allowPathsOutsideProject !== false;
+	// A configured budget replaces the default; it is clamped to the schema's 0..8 range.
+	const configuredMaxWorkerDepth = winningLayer.parsed.workerAccess?.maxWorkerDepth;
+	const maxWorkerDepth = configuredMaxWorkerDepth === undefined
+		? baseConfig.safety.maxWorkerDepth
+		: Math.max(0, Math.min(8, Math.trunc(configuredMaxWorkerDepth)));
 
 	return {
 		status: "project",
@@ -1017,6 +1022,7 @@ export function loadActiveTeamConfig(options: LoadActiveTeamConfigOptions = { cw
 			...baseConfig,
 			safety: {
 				...baseConfig.safety,
+				maxWorkerDepth,
 				allowWorkerPathsOutsideProject,
 				allowProjectProfiles: true,
 				projectRoot,
